@@ -1,0 +1,17 @@
+{
+  "extends": "@electron-toolkit/tsconfig/tsconfig.node.json",
+  "include": [
+    "src/web-proxy/**/*",
+    "src/main/proxy/**/*",
+    "src/main/kproxy/**/*",
+    "src/main/runtimePath.ts"
+  ],
+  "compilerOptions": {
+    "composite": true,
+    "outDir": "out/web-proxy",
+    "rootDir": "src",
+    "types": ["node"],
+    "module": "commonjs",
+    "moduleResolution": "node"
+  }
+}

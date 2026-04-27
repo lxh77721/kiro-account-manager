@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Kiro Web Proxy</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="page">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">Kiro Web Proxy</p>
+          <h1>浏览器导入账号并启动 5580 反代</h1>
+          <p class="lead">
+            支持 CSV / TXT / JSON 导入，在线校验账号，自动把可用账号同步进 Kiro 反代池。
+          </p>
+        </div>
+        <div class="hero-card">
+          <div class="status-row">
+            <span>反代状态</span>
+            <strong id="proxy-running">-</strong>
+          </div>
+          <div class="status-row">
+            <span>Web 面板</span>
+            <strong id="panel-address">-</strong>
+          </div>
+          <div class="status-row">
+            <span>反代地址</span>
+            <strong id="proxy-address">-</strong>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" id="auth-panel">
+        <div class="panel-header">
+          <h2>管理口令</h2>
+          <p>如果设置了 `KIRO_WEB_ADMIN_TOKEN`，需要先输入才能操作。</p>
+        </div>
+        <div class="toolbar">
+          <input id="admin-token" placeholder="输入 KIRO_WEB_ADMIN_TOKEN" />
+          <button id="save-token" class="primary">保存口令</button>
+        </div>
+      </section>
+
+      <section class="grid">
+        <div class="panel">
+          <div class="panel-header">
+            <h2>导入账号</h2>
+            <p>推荐直接粘贴 CSV。支持桌面版表头：邮箱,昵称,登录方式,RefreshToken,ClientId,ClientSecret,Region</p>
+          </div>
+          <div class="toolbar">
+            <select id="import-format">
+              <option value="csv">CSV</option>
+              <option value="txt">TXT</option>
+              <option value="json">JSON</option>
+            </select>
+            <input id="import-file" type="file" />
+            <button id="import-btn" class="primary">导入</button>
+            <button id="verify-all-btn">全部校验</button>
+          </div>
+          <textarea
+            id="import-content"
+            rows="10"
+            placeholder="邮箱,昵称,登录方式,RefreshToken,ClientId,ClientSecret,Region&#10;user@example.com,user,BuilderId,rt_xxx,cid_xxx,secret_xxx,us-east-1"
+          ></textarea>
+          <pre class="hint" id="import-result">等待导入</pre>
+        </div>
+
+        <div class="panel">
+          <div class="panel-header">
+            <h2>反代配置</h2>
+            <p>Web 面板和反代端口分离。面板默认 3080，Kiro/OpenAI 兼容反代默认 5580。</p>
+          </div>
+          <div class="form-grid">
+            <label>
+              <span>Host</span>
+              <input id="proxy-host" value="0.0.0.0" />
+            </label>
+            <label>
+              <span>Port</span>
+              <input id="proxy-port" type="number" value="5580" />
+            </label>
+            <label class="wide">
+              <span>API Key（可选）</span>
+              <input id="proxy-api-key" placeholder="为空则不校验" />
+            </label>
+            <label class="checkbox">
+              <input id="proxy-multi-account" type="checkbox" checked />
+              <span>启用多账号轮询</span>
+            </label>
+            <label class="checkbox">
+              <input id="proxy-log-requests" type="checkbox" checked />
+              <span>记录请求日志</span>
+            </label>
+          </div>
+          <div class="toolbar">
+            <button id="save-config-btn">保存配置</button>
+            <button id="start-proxy-btn" class="primary">启动反代</button>
+            <button id="stop-proxy-btn" class="danger">停止反代</button>
+          </div>
+          <div class="endpoint-list">
+            <div><code>POST /v1/chat/completions</code></div>
+            <div><code>POST /v1/messages</code></div>
+            <div><code>GET /v1/models</code></div>
+            <div><code>GET /health</code></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>账号列表</h2>
+          <p>只有 `active` 且已拿到 `accessToken` 的账号会进入反代池。</p>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>邮箱</th>
+                <th>Provider</th>
+                <th>状态</th>
+                <th>套餐</th>
+                <th>额度</th>
+                <th>Token</th>
+                <th>最后检查</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="accounts-table"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+  </html>

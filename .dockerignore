@@ -1,0 +1,8 @@
+node_modules
+dist
+out
+npm-debug.log
+.kiro
+.vscode
+.git
+data

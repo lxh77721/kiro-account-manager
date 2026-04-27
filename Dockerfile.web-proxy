@@ -1,0 +1,41 @@
+FROM node:22-bookworm-slim AS deps
+
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+RUN npm ci --ignore-scripts
+
+FROM deps AS builder
+
+WORKDIR /app
+
+COPY . .
+RUN npm run build:web-app
+
+FROM node:22-bookworm-slim AS runtime
+
+WORKDIR /app
+
+ENV NODE_ENV=production
+
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
+
+COPY --from=builder /app/out ./out
+
+RUN mkdir -p /data
+
+ENV KIRO_WEB_HOST=0.0.0.0
+ENV KIRO_WEB_PORT=3080
+ENV KIRO_PROXY_HOST=0.0.0.0
+ENV KIRO_PROXY_PORT=5580
+ENV KIRO_USER_DATA_PATH=/data
+
+VOLUME ["/data"]
+
+EXPOSE 3080 5580
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=5 \
+  CMD node -e "fetch('http://127.0.0.1:' + (process.env.KIRO_WEB_PORT || 3080) + '/api/meta').then((res) => process.exit(res.ok ? 0 : 1)).catch(() => process.exit(1))"
+
+CMD ["node", "out/web-proxy/web-proxy/server.js"]

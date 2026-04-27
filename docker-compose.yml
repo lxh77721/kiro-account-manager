@@ -1,0 +1,26 @@
+services:
+  kiro-account-manager:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: kiro-account-manager
+    restart: unless-stopped
+    shm_size: 1gb
+    ports:
+      - "6080:6080"
+      - "5900:5900"
+      - "5580:5580"
+    environment:
+      SCREEN_WIDTH: 1920
+      SCREEN_HEIGHT: 1200
+      SCREEN_DEPTH: 24
+      VNC_PASSWORD: change-this-password
+      KIRO_CONTAINER_DESKTOP: "true"
+      KIRO_DISABLE_TRAY: "true"
+      KIRO_DISABLE_AUTO_UPDATE: "true"
+      KIRO_DISABLE_GLOBAL_SHORTCUTS: "true"
+    volumes:
+      - kiro-home:/root
+
+volumes:
+  kiro-home:
