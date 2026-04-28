@@ -1,0 +1,22 @@
+[
+  {
+    "time": "2026-04-28 09:41:17.909",
+    "path": "/v1/messages",
+    "model": "claude-haiku-4-5-20251001",
+    "status": 200,
+    "tokens": 516,
+    "inputTokens": 264,
+    "outputTokens": 252,
+    "credits": 0.010532503482587064
+  },
+  {
+    "time": "2026-04-28 09:05:57.920",
+    "path": "/v1/messages",
+    "model": "claude-haiku-4-5-20251001",
+    "status": 200,
+    "tokens": 516,
+    "inputTokens": 264,
+    "outputTokens": 252,
+    "credits": 0.010532503482587064
+  }
+]
