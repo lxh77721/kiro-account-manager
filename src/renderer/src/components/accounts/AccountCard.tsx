@@ -23,9 +23,11 @@ import {
   ExternalLink,
   CreditCard,
   Sparkles,
-  LogOut
+  LogOut,
+  RotateCcw
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { isBannedAccount, isRateLimitedAccount } from '@/lib/accountState'
 
 // 解析 ARGB 颜色转换为 CSS rgba
 function toRgba(argbColor: string): string {
@@ -155,6 +157,7 @@ export const AccountCard = memo(function AccountCard({
     removeAccount,
     checkAccountStatus,
     refreshAccountToken,
+    restoreRateLimitedAccounts,
     toggleSelection,
     maskEmail,
     maskNickname,
@@ -207,6 +210,10 @@ export const AccountCard = memo(function AccountCard({
   const handleRefresh = async (): Promise<void> => {
     // 获取最新的使用量数据
     await checkAccountStatus(account.id)
+  }
+
+  const handleRestoreRateLimit = async (): Promise<void> => {
+    await restoreRateLimitedAccounts([account.id])
   }
 
   const handleLogout = async (): Promise<void> => {
@@ -274,11 +281,16 @@ export const AccountCard = memo(function AccountCard({
   const isHighUsage = account.usage.percentUsed > 80
 
   // 检测账号是否被封禁/暂停（多种错误格式）
-  const isUnauthorized = account.lastError?.includes('UnauthorizedException') || 
-                         account.lastError?.includes('AccountSuspendedException') ||
+  const isUnauthorized = isBannedAccount(account); /*
+  // legacy banned checks replaced by isBannedAccount(account)
                          account.lastError?.includes('账户已封禁') ||
                          account.lastError?.includes('HTTP 403') ||
                          account.lastError?.includes('HTTP 423')
+  */
+  const isRateLimited = isRateLimitedAccount(account)
+  const rateLimitedUntilText = account.proxyState?.cooldownUntil
+    ? new Date(account.proxyState.cooldownUntil).toLocaleString(isEn ? 'en-US' : 'zh-CN')
+    : null
   
   // 封禁详情弹窗状态
   const [showBanDialog, setShowBanDialog] = useState(false)
@@ -496,6 +508,7 @@ export const AccountCard = memo(function AccountCard({
                  <div className={cn(
                     "text-[10px] font-medium px-2 py-0.5 rounded-full flex items-center gap-1 flex-shrink-0",
                     isUnauthorized ? "text-red-600 bg-red-100 dark:text-red-400 dark:bg-red-900/30" :
+                    isRateLimited ? "text-amber-700 bg-amber-100 dark:text-amber-300 dark:bg-amber-950/40" :
                     account.status === 'active' ? "text-green-600 bg-green-100 dark:text-green-400 dark:bg-green-900/30" :
                     account.status === 'error' ? "text-red-600 bg-red-100 dark:text-red-400 dark:bg-red-900/30" :
                     account.status === 'expired' ? "text-orange-600 bg-orange-100 dark:text-orange-400 dark:bg-orange-900/30" :
@@ -503,7 +516,7 @@ export const AccountCard = memo(function AccountCard({
                     "text-muted-foreground bg-muted"
                  )}>
                     {account.status === 'refreshing' && <Loader2 className="h-3 w-3 animate-spin" />}
-                    {isUnauthorized && <AlertCircle className="h-3 w-3" />}
+                    {(isUnauthorized || isRateLimited) && <AlertCircle className="h-3 w-3" />}
                     {isUnauthorized ? (
                       <span 
                         className="cursor-pointer hover:underline" 
@@ -511,7 +524,7 @@ export const AccountCard = memo(function AccountCard({
                       >
                         {isEn ? 'Banned' : '已封禁'}
                       </span>
-                    ) : (isEn ? StatusLabelsEn : StatusLabelsZh)[account.status]}
+                    ) : isRateLimited ? (isEn ? 'Rate Limited' : '\u9650\u6d41\u4e2d') : (isEn ? StatusLabelsEn : StatusLabelsZh)[account.status]}
                  </div>
               </div>
               <div className="flex items-center gap-2 mt-1">
@@ -652,6 +665,20 @@ export const AccountCard = memo(function AccountCard({
           </div>
         )}
 
+        {isRateLimited && (
+          <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[10px] text-amber-800 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-200">
+            <div className="flex items-center gap-1.5 font-medium">
+              <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+              <span>{isEn ? 'Excluded from proxy scheduling' : '\u5f53\u524d\u5df2\u4ece\u53cd\u4ee3\u8c03\u5ea6\u4e2d\u6392\u9664'}</span>
+            </div>
+            <div className="mt-1 text-amber-700/90 dark:text-amber-200/80">
+              {rateLimitedUntilText
+                ? (isEn ? `Estimated quota reset: ${rateLimitedUntilText}. Restore manually after that.` : `\u9884\u8ba1\u989d\u5ea6\u6062\u590d\u65f6\u95f4\uff1a${rateLimitedUntilText}\uff0c\u4e4b\u540e\u8bf7\u624b\u52a8\u6062\u590d\u3002`)
+                : (isEn ? 'Recover manually after the quota resets.' : '\u989d\u5ea6\u6062\u590d\u540e\u53ef\u624b\u52a8\u6062\u590d\u8be5\u8d26\u53f7\u3002')}
+            </div>
+          </div>
+        )}
+
         {/* Footer Actions */}
         <div className="pt-3 border-t flex items-center justify-between mt-auto gap-2 shrink-0">
             {/* Left: Token expiry info */}
@@ -672,6 +699,17 @@ export const AccountCard = memo(function AccountCard({
 
             {/* Right: Actions */}
             <div className="flex items-center gap-0.5">
+               {isRateLimited && (
+                 <Button
+                   size="icon"
+                   variant="ghost"
+                   className="h-7 w-7 text-amber-600 hover:bg-amber-100 hover:text-amber-700 dark:hover:bg-amber-950/40"
+                   onClick={(e) => { e.stopPropagation(); void handleRestoreRateLimit() }}
+                   title={isEn ? 'Restore proxy availability' : '\u6062\u590d\u4ee3\u7406\u53ef\u7528\u72b6\u6001'}
+                 >
+                   <RotateCcw className="h-3.5 w-3.5" />
+                 </Button>
+               )}
                {account.isActive ? (
                  <Button
                    size="icon"
@@ -720,7 +758,7 @@ export const AccountCard = memo(function AccountCard({
         </div>
 
         {/* Error Message (Non-banned) */}
-        {account.lastError && !isUnauthorized && (
+        {account.lastError && !isUnauthorized && !isRateLimited && (
           <div className="bg-red-50 text-red-600 text-[10px] p-1.5 rounded flex items-center gap-1.5 truncate mt-1" title={account.lastError}>
              <AlertTriangle className="h-3 w-3 shrink-0" />
              <span className="truncate">{account.lastError}</span>

@@ -328,6 +328,8 @@ export class WebProxyService {
         return this.proxyGetAccounts()
       case 'proxyResetPool':
         return this.proxyResetPool()
+      case 'proxyResetAccountState':
+        return this.proxyResetAccountState(String(params.accountId || ''))
       case 'proxyResetCredits':
         return this.proxyResetCredits()
       case 'proxyResetTokens':
@@ -1065,15 +1067,22 @@ export class WebProxyService {
     }
   }
 
-  private proxyGetAccounts(): { accounts: ProxyAccount[]; availableCount: number } {
+  private proxyGetAccounts(): { accounts: ProxyAccount[]; availableCount: number; rateLimitedCount: number } {
+    const pool = this.proxyServer.getAccountPool()
     return {
-      accounts: this.state.accounts.map((account) => toProxyAccount(account)),
-      availableCount: this.getEligibleAccounts().length
+      accounts: pool.getAllAccounts(),
+      availableCount: pool.availableCount,
+      rateLimitedCount: pool.rateLimitedCount
     }
   }
 
   private proxyResetPool(): { success: boolean; error?: string } {
     this.proxyServer.getAccountPool().reset()
+    return { success: true }
+  }
+
+  private proxyResetAccountState(accountId: string): { success: boolean; error?: string } {
+    this.proxyServer.getAccountPool().resetAccountState(accountId)
     return { success: true }
   }
 
@@ -1910,6 +1919,10 @@ export class WebProxyService {
         selectedAccountIds: [],
         logRequests: true,
         maxConcurrent: 10,
+        maxQueueSize: 50,
+        maxRequestBodyBytes: 2 * 1024 * 1024,
+        requestTimeoutMs: 180000,
+        maxInFlightPerAccount: 1,
         maxRetries: 3,
         retryDelayMs: 1000,
         tokenRefreshBeforeExpiry: 300,

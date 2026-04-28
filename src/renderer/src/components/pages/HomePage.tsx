@@ -2,10 +2,11 @@ import { useMemo } from 'react'
 import { useAccountsStore } from '@/store/accounts'
 import type { Account } from '@/types/account'
 import { Card, CardContent, CardHeader, CardTitle } from '../ui'
-import { Users, CheckCircle, AlertTriangle, Clock, Zap, Shield, Fingerprint, FolderPlus, Tag, TrendingUp, Activity, BarChart3 } from 'lucide-react'
+import { Users, CheckCircle, AlertTriangle, Clock, Zap, Shield, Fingerprint, FolderPlus, Tag, TrendingUp, Activity, BarChart3, AlertCircle } from 'lucide-react'
 import kiroLogo from '@/assets/kiro-high-resolution-logo-transparent.png'
 import { cn } from '@/lib/utils'
 import { useTranslation } from '@/hooks/useTranslation'
+import { isRateLimitedAccount } from '@/lib/accountState'
 
 // 订阅类型颜色映射
 const getSubscriptionColor = (type: string, title?: string): string => {
@@ -35,12 +36,19 @@ export function HomePage() {
         refreshing: 0,
         unknown: 0
       },
+      normalCount: 0,
       expiringSoonCount: 0,
-      bannedCount: 0
+      bannedCount: 0,
+      rateLimitedCount: 0
     }
 
     for (const account of accounts.values()) {
       nextStats.byStatus[account.status]++
+      const isRateLimited = isRateLimitedAccount(account)
+
+      if (account.status === 'active' && !isRateLimited) {
+        nextStats.normalCount++
+      }
 
       if (
         account.subscription.daysRemaining !== undefined &&
@@ -56,6 +64,10 @@ export function HomePage() {
       ) {
         nextStats.bannedCount++
       }
+
+      if (isRateLimited) {
+        nextStats.rateLimitedCount++
+      }
     }
 
     return nextStats
@@ -69,7 +81,7 @@ export function HomePage() {
 
     for (const account of accounts.values()) {
       // 只统计正常状态的账号
-      if (account.status === 'active' && account.usage) {
+      if (account.status === 'active' && !isRateLimitedAccount(account) && account.usage) {
         const limit = account.usage.limit ?? 0
         const used = account.usage.current ?? 0
         if (limit > 0) {
@@ -103,10 +115,17 @@ export function HomePage() {
     },
     { 
       label: isEn ? 'Active' : '正常账号', 
-      value: stats.byStatus?.active || 0, 
+      value: stats.normalCount || 0, 
       icon: CheckCircle, 
       color: 'text-green-500',
       bgColor: 'bg-green-500/10'
+    },
+    {
+      label: isEn ? 'Rate Limited' : '限流账号',
+      value: stats.rateLimitedCount || 0,
+      icon: AlertCircle,
+      color: 'text-amber-500',
+      bgColor: 'bg-amber-500/10'
     },
     { 
       label: isEn ? 'Banned' : '已封禁', 
@@ -150,7 +169,7 @@ export function HomePage() {
       </div>
 
       {/* Stats Grid */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-4">
         {statCards.map((stat) => {
           const Icon = stat.icon
           return (

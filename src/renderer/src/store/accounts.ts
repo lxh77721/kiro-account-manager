@@ -15,6 +15,7 @@ import type {
   SubscriptionType,
   IdpType
 } from '../types/account'
+import { isBannedAccount, isRateLimitedAccount } from '../lib/accountState'
 
 // ============================================
 // 账号管理 Store
@@ -27,6 +28,18 @@ function generateRandomMachineId(): string {
   return Array.from(bytes)
     .map(b => b.toString(16).padStart(2, '0'))
     .join('')
+}
+
+function stripRuntimeAccountState(account: Account): Omit<Account, 'proxyState'> {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const { proxyState, ...rest } = account
+  return rest
+}
+
+function serializeAccountsForStorage(accounts: Map<string, Account>): Record<string, Omit<Account, 'proxyState'>> {
+  return Object.fromEntries(
+    Array.from(accounts.entries()).map(([id, account]) => [id, stripRuntimeAccountState(account)])
+  ) as Record<string, Omit<Account, 'proxyState'>>
 }
 
 // 自动 Token 刷新定时器
@@ -169,6 +182,16 @@ interface AccountsActions {
   batchRefreshTokens: (ids: string[]) => Promise<BatchOperationResult>
   checkAccountStatus: (id: string) => Promise<void>
   batchCheckStatus: (ids: string[]) => Promise<BatchOperationResult>
+  updateProxyAccountState: (data: {
+    id: string
+    accessToken?: string
+    refreshToken?: string
+    expiresAt?: number
+    cooldownUntil?: number
+    cooldownReason?: 'quota' | 'error'
+  }) => void
+  syncProxyAccountStates: () => Promise<void>
+  restoreRateLimitedAccounts: (ids: string[]) => Promise<BatchOperationResult>
 
   // 统计
   getStats: () => AccountStats
@@ -681,10 +704,11 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
 
     // 封禁筛选
     if (filter.bannedOnly) {
-      result = result.filter((a) => 
-        a.lastError?.includes('UnauthorizedException') || 
-        a.lastError?.includes('AccountSuspendedException')
-      )
+      result = result.filter((a) => isBannedAccount(a))
+    }
+
+    if (filter.rateLimitedOnly) {
+      result = result.filter((a) => isRateLimitedAccount(a))
     }
 
     // 应用排序
@@ -788,7 +812,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
     const data: AccountExportData = {
       version: get().appVersion,
       exportedAt: Date.now(),
-      accounts: exportAccounts.map(({ isActive, ...rest }) => rest),
+      accounts: exportAccounts.map(({ isActive, proxyState, ...rest }) => rest),
       groups: Array.from(groups.values()),
       tags: Array.from(tags.values())
     }
@@ -1218,6 +1242,112 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
 
   // ==================== 统计 ====================
 
+  updateProxyAccountState: (data) => {
+    set((state) => {
+      const accounts = new Map(state.accounts)
+      const account = accounts.get(data.id)
+      if (!account) {
+        return { accounts }
+      }
+
+      const nextProxyState = data.cooldownReason || data.cooldownUntil
+        ? {
+            cooldownUntil: data.cooldownUntil,
+            cooldownReason: data.cooldownReason,
+            updatedAt: Date.now()
+          }
+        : undefined
+
+      accounts.set(data.id, {
+        ...account,
+        credentials: {
+          ...account.credentials,
+          accessToken: data.accessToken ?? account.credentials.accessToken,
+          refreshToken: data.refreshToken ?? account.credentials.refreshToken,
+          expiresAt: data.expiresAt ?? account.credentials.expiresAt
+        },
+        proxyState: nextProxyState
+      })
+
+      return { accounts }
+    })
+  },
+
+  syncProxyAccountStates: async () => {
+    try {
+      const result = await window.api.proxyGetAccounts()
+      const accountStates = new Map(
+        (result.accounts as Array<{ id: string; cooldownUntil?: number; cooldownReason?: 'quota' | 'error' }>).map((account) => [
+          account.id,
+          account
+        ])
+      )
+
+      set((state) => {
+        const accounts = new Map(state.accounts)
+
+        for (const [id, account] of accounts) {
+          const proxyAccount = accountStates.get(id)
+          accounts.set(id, {
+            ...account,
+            proxyState: proxyAccount?.cooldownReason || proxyAccount?.cooldownUntil
+              ? {
+                  cooldownUntil: proxyAccount.cooldownUntil,
+                  cooldownReason: proxyAccount.cooldownReason,
+                  updatedAt: Date.now()
+                }
+              : undefined
+          })
+        }
+
+        return { accounts }
+      })
+    } catch (error) {
+      console.error('[Store] Failed to sync proxy account states:', error)
+    }
+  },
+
+  restoreRateLimitedAccounts: async (ids) => {
+    const result: BatchOperationResult = { success: 0, failed: 0, errors: [] }
+
+    for (const id of ids) {
+      try {
+        const restoreResult = await window.api.proxyResetAccountState(id)
+        if (!restoreResult.success) {
+          result.failed++
+          result.errors.push({
+            id,
+            error: restoreResult.error || 'Failed to restore rate-limited account'
+          })
+          continue
+        }
+
+        set((state) => {
+          const accounts = new Map(state.accounts)
+          const account = accounts.get(id)
+          if (account) {
+            accounts.set(id, {
+              ...account,
+              proxyState: undefined
+            })
+          }
+
+          return { accounts }
+        })
+
+        result.success++
+      } catch (error) {
+        result.failed++
+        result.errors.push({
+          id,
+          error: error instanceof Error ? error.message : 'Unknown error'
+        })
+      }
+    }
+
+    return result
+  },
+
   getStats: () => {
     const { accounts } = get()
     const accountList = Array.from(accounts.values())
@@ -1248,24 +1378,32 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
         IAM_SSO: 0
       },
       activeCount: 0,
+      normalCount: 0,
       expiringSoonCount: 0,
-      bannedCount: 0
+      bannedCount: 0,
+      rateLimitedCount: 0
     }
+
+    const now = Date.now()
 
     for (const account of accountList) {
       stats.byStatus[account.status]++
       stats.bySubscription[account.subscription.type]++
       stats.byIdp[account.idp]++
+      const isRateLimited = isRateLimitedAccount(account, now)
 
       if (account.isActive) stats.activeCount++
+      if (account.status === 'active' && !isRateLimited) stats.normalCount++
       if (account.subscription.daysRemaining !== undefined &&
           account.subscription.daysRemaining <= 7) {
         stats.expiringSoonCount++
       }
       // 统计封禁账号
-      if (account.lastError?.includes('UnauthorizedException') || 
-          account.lastError?.includes('AccountSuspendedException')) {
+      if (isBannedAccount(account)) {
         stats.bannedCount++
+      }
+      if (isRateLimited) {
+        stats.rateLimitedCount++
       }
     }
 
@@ -1291,6 +1429,12 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
         // 为没有 machineId 的现有账户生成一个
         let needsSave = false
         for (const [id, account] of accounts) {
+          if (account.proxyState) {
+            account.proxyState = undefined
+            accounts.set(id, account)
+            needsSave = true
+          }
+
           if (!account.machineId) {
             account.machineId = generateRandomMachineId()
             accounts.set(id, account)
@@ -1504,7 +1648,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
 
     try {
       await window.api.saveAccounts({
-        accounts: Object.fromEntries(accounts),
+        accounts: serializeAccountsForStorage(accounts),
         groups: Object.fromEntries(groups),
         tags: Object.fromEntries(tags),
         activeAccountId,
@@ -2241,7 +2385,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
     const computeHash = () => {
       const { accounts, groups, tags, activeAccountId } = get()
       return JSON.stringify({
-        accounts: Object.fromEntries(accounts),
+        accounts: serializeAccountsForStorage(accounts),
         groups: Object.fromEntries(groups),
         tags: Object.fromEntries(tags),
         activeAccountId

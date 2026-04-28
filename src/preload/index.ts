@@ -672,13 +672,17 @@ const api = {
   },
 
   // 获取反代池账号列表
-  proxyGetAccounts: (): Promise<{ accounts: unknown[]; availableCount: number }> => {
+  proxyGetAccounts: (): Promise<{ accounts: unknown[]; availableCount: number; rateLimitedCount: number }> => {
     return ipcRenderer.invoke('proxy-get-accounts')
   },
 
   // 重置反代池状态
   proxyResetPool: (): Promise<{ success: boolean; error?: string }> => {
     return ipcRenderer.invoke('proxy-reset-pool')
+  },
+
+  proxyResetAccountState: (accountId: string): Promise<{ success: boolean; error?: string }> => {
+    return ipcRenderer.invoke('proxy-reset-account-state', accountId)
   },
 
   // 刷新模型缓存
@@ -762,6 +766,16 @@ const api = {
     ipcRenderer.on('proxy-status-change', handler)
     return () => {
       ipcRenderer.removeListener('proxy-status-change', handler)
+    }
+  },
+
+  onProxyAccountUpdate: (callback: (account: { id: string; accessToken?: string; refreshToken?: string; expiresAt?: number; cooldownUntil?: number; cooldownReason?: 'quota' | 'error' }) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, account: { id: string; accessToken?: string; refreshToken?: string; expiresAt?: number; cooldownUntil?: number; cooldownReason?: 'quota' | 'error' }): void => {
+      callback(account)
+    }
+    ipcRenderer.on('proxy-account-update', handler)
+    return () => {
+      ipcRenderer.removeListener('proxy-account-update', handler)
     }
   },
 

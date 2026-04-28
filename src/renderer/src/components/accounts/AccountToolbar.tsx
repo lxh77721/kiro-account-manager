@@ -3,6 +3,7 @@ import { Button, Badge } from '../ui'
 import { useAccountsStore } from '@/store/accounts'
 import { useTranslation } from '@/hooks/useTranslation'
 import { AccountFilterPanel } from './AccountFilter'
+import { isRateLimitedAccount } from '@/lib/accountState'
 import {
   Search,
   Plus,
@@ -21,7 +22,8 @@ import {
   ChevronDown,
   Check,
   X,
-  Minus
+  Minus,
+  RotateCcw
 } from 'lucide-react'
 
 interface AccountToolbarProps {
@@ -54,6 +56,7 @@ export function AccountToolbar({
     batchCheckStatus,
     getFilteredAccounts,
     getStats,
+    restoreRateLimitedAccounts,
     privacyMode,
     setPrivacyMode,
     groups,
@@ -152,6 +155,9 @@ export function AccountToolbar({
   const stats = getStats()
   const filteredCount = getFilteredAccounts().length
   const selectedCount = selectedIds.size
+  const selectedRateLimitedCount = Array.from(selectedIds)
+    .map((id) => accounts.get(id))
+    .filter((account) => account && isRateLimitedAccount(account)).length
 
   const handleSearch = (value: string): void => {
     setFilter({ ...filter, search: value || undefined })
@@ -176,6 +182,11 @@ export function AccountToolbar({
     if (confirm(isEn ? `Delete ${selectedCount} selected accounts?` : `确定要删除选中的 ${selectedCount} 个账号吗？`)) {
       removeAccounts(Array.from(selectedIds))
     }
+  }
+
+  const handleBatchRestoreRateLimit = async (): Promise<void> => {
+    if (selectedRateLimitedCount === 0) return
+    await restoreRateLimitedAccounts(Array.from(selectedIds))
   }
 
   const handleToggleSelectAll = (): void => {
@@ -232,6 +243,11 @@ export function AccountToolbar({
           {stats.expiringSoonCount > 0 && (
             <Badge variant="destructive" className="gap-1">
               {stats.expiringSoonCount} {isEn ? 'expiring' : '个即将到期'}
+            </Badge>
+          )}
+          {stats.rateLimitedCount > 0 && (
+            <Badge className="gap-1 bg-amber-500/10 text-amber-700 hover:bg-amber-500/10 dark:text-amber-300">
+              {stats.rateLimitedCount} {isEn ? 'rate limited' : '个限流中'}
             </Badge>
           )}
         </div>
@@ -462,6 +478,16 @@ export function AccountToolbar({
               <RefreshCw className="h-4 w-4 mr-1" />
             )}
             {isEn ? 'Check' : '检查'}
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={handleBatchRestoreRateLimit}
+            disabled={selectedRateLimitedCount === 0}
+            title={isEn ? 'Restore selected rate-limited accounts' : '恢复选中账号的限流标记'}
+          >
+            <RotateCcw className="h-4 w-4 mr-1" />
+            {isEn ? 'Restore' : '恢复'}
           </Button>
           <Button
             variant="ghost"

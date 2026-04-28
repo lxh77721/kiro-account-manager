@@ -67,7 +67,8 @@ export function AccountFilterPanel(): React.ReactNode {
     filter.usageMax !== undefined ||
     filter.daysRemainingMin !== undefined ||
     filter.daysRemainingMax !== undefined ||
-    filter.bannedOnly
+    filter.bannedOnly ||
+    filter.rateLimitedOnly
   )
 
   const toggleArrayFilter = <T extends string>(
@@ -171,6 +172,17 @@ export function AccountFilterPanel(): React.ReactNode {
                   onClick={() => setFilter({ ...filter, bannedOnly: !filter.bannedOnly })}
                 >
                   {isEn ? 'Banned' : '已封禁'}({stats.bannedCount})
+                </button>
+                <button
+                  className={cn(
+                    'px-2 py-0.5 text-xs rounded border transition-colors',
+                    filter.rateLimitedOnly
+                      ? 'bg-amber-500 text-white border-amber-500'
+                      : 'hover:bg-muted text-amber-600 border-amber-200'
+                  )}
+                  onClick={() => setFilter({ ...filter, rateLimitedOnly: !filter.rateLimitedOnly })}
+                >
+                  {isEn ? 'Rate Limited' : '限流中'}({stats.rateLimitedCount})
                 </button>
               </div>
             </div>

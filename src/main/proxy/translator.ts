@@ -260,20 +260,99 @@ function normalizeImageFormat(format: string): string {
 // Kiro API 工具描述最大长度
 const KIRO_MAX_TOOL_DESC_LEN = 10237 // 留出 "..." 的空间
 
+const KIRO_COMPACT_TOOL_DESC_LEN = Math.min(KIRO_MAX_TOOL_DESC_LEN, 1200)
+const KIRO_MAX_SCHEMA_DESC_LEN = 240
+const KIRO_MAX_SCHEMA_TITLE_LEN = 120
+const TOOL_SCHEMA_OMIT_KEYS = new Set([
+  '$schema',
+  'examples',
+  'example',
+  'deprecated',
+  'readOnly',
+  'writeOnly'
+])
+
+function truncateToolText(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value
+
+  const marker = ' ... '
+  const available = Math.max(0, maxLength - marker.length)
+  const headLength = Math.max(24, Math.floor(available * 0.7))
+  const tailLength = Math.max(12, available - headLength)
+  return `${value.slice(0, headLength)}${marker}${value.slice(-tailLength)}`
+}
+
+function compactToolSchema(schema: unknown): unknown {
+  if (Array.isArray(schema)) {
+    return schema.map(item => compactToolSchema(item))
+  }
+
+  if (!schema || typeof schema !== 'object') {
+    return schema
+  }
+
+  const result: Record<string, unknown> = {}
+
+  for (const [key, value] of Object.entries(schema as Record<string, unknown>)) {
+    if (TOOL_SCHEMA_OMIT_KEYS.has(key)) {
+      continue
+    }
+
+    if (key === 'description' && typeof value === 'string') {
+      result[key] = truncateToolText(value, KIRO_MAX_SCHEMA_DESC_LEN)
+      continue
+    }
+
+    if (key === 'title' && typeof value === 'string') {
+      result[key] = truncateToolText(value, KIRO_MAX_SCHEMA_TITLE_LEN)
+      continue
+    }
+
+    if (
+      (key === 'properties' || key === '$defs' || key === 'definitions') &&
+      value &&
+      typeof value === 'object' &&
+      !Array.isArray(value)
+    ) {
+      result[key] = Object.fromEntries(
+        Object.entries(value as Record<string, unknown>).map(([childKey, childValue]) => [
+          childKey,
+          compactToolSchema(childValue)
+        ])
+      )
+      continue
+    }
+
+    if (key === 'items') {
+      result[key] = compactToolSchema(value)
+      continue
+    }
+
+    if ((key === 'anyOf' || key === 'allOf' || key === 'oneOf') && Array.isArray(value)) {
+      result[key] = value.map(item => compactToolSchema(item))
+      continue
+    }
+
+    result[key] = compactToolSchema(value)
+  }
+
+  return result
+}
+
 function convertOpenAITools(tools?: OpenAITool[]): KiroToolWrapper[] {
   if (!tools) return []
 
   return tools.map(tool => {
     let description = tool.function.description || `Tool: ${tool.function.name}`
     // 截断过长的描述
-    if (description.length > KIRO_MAX_TOOL_DESC_LEN) {
-      description = description.substring(0, KIRO_MAX_TOOL_DESC_LEN) + '...'
+    if (description.length > KIRO_COMPACT_TOOL_DESC_LEN) {
+      description = truncateToolText(description, KIRO_COMPACT_TOOL_DESC_LEN)
     }
     return {
       toolSpecification: {
         name: shortenToolName(tool.function.name),
         description,
-        inputSchema: { json: tool.function.parameters }
+        inputSchema: { json: compactToolSchema(tool.function.parameters) }
       }
     }
   })
@@ -611,14 +690,14 @@ function convertClaudeTools(tools?: { name: string; description: string; input_s
   return tools.map(tool => {
     let description = tool.description || `Tool: ${tool.name}`
     // 截断过长的描述
-    if (description.length > KIRO_MAX_TOOL_DESC_LEN) {
-      description = description.substring(0, KIRO_MAX_TOOL_DESC_LEN) + '...'
+    if (description.length > KIRO_COMPACT_TOOL_DESC_LEN) {
+      description = truncateToolText(description, KIRO_COMPACT_TOOL_DESC_LEN)
     }
     return {
       toolSpecification: {
         name: shortenToolName(tool.name),
         description,
-        inputSchema: { json: tool.input_schema }
+        inputSchema: { json: compactToolSchema(tool.input_schema) }
       }
     }
   })

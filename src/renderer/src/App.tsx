@@ -17,6 +17,8 @@ function App(): React.JSX.Element {
   const stopAutoTokenRefresh = useAccountsStore((state) => state.stopAutoTokenRefresh)
   const handleBackgroundRefreshResult = useAccountsStore((state) => state.handleBackgroundRefreshResult)
   const handleBackgroundCheckResult = useAccountsStore((state) => state.handleBackgroundCheckResult)
+  const updateProxyAccountState = useAccountsStore((state) => state.updateProxyAccountState)
+  const syncProxyAccountStates = useAccountsStore((state) => state.syncProxyAccountStates)
   const accounts = useAccountsStore((state) => state.accounts)
   const activeAccountId = useAccountsStore((state) => state.activeAccountId)
   const setActiveAccount = useAccountsStore((state) => state.setActiveAccount)
@@ -81,6 +83,8 @@ function App(): React.JSX.Element {
     loadFromStorage().then(() => {
       if (cancelled) return
 
+      void syncProxyAccountStates()
+
       if (webMode) {
         refreshTimer = setTimeout(() => {
           if (!cancelled) {
@@ -100,7 +104,7 @@ function App(): React.JSX.Element {
       }
       stopAutoTokenRefresh()
     }
-  }, [webMode, loadFromStorage, startAutoTokenRefresh, stopAutoTokenRefresh])
+  }, [webMode, loadFromStorage, startAutoTokenRefresh, stopAutoTokenRefresh, syncProxyAccountStates])
 
   // 账户变化时更新托盘信息
   useEffect(() => {
@@ -153,6 +157,50 @@ function App(): React.JSX.Element {
       unsubscribe()
     }
   }, [handleBackgroundCheckResult])
+
+  useEffect(() => {
+    const unsubscribe = window.api.onProxyAccountUpdate((account) => {
+      updateProxyAccountState(account)
+    })
+
+    return () => {
+      unsubscribe()
+    }
+  }, [updateProxyAccountState])
+
+  useEffect(() => {
+    let syncTimer: ReturnType<typeof setTimeout> | null = null
+
+    const scheduleSync = () => {
+      if (syncTimer) {
+        clearTimeout(syncTimer)
+      }
+
+      syncTimer = setTimeout(() => {
+        syncTimer = null
+        void syncProxyAccountStates()
+      }, 800)
+    }
+
+    const unsubResponse = window.api.onProxyResponse(() => {
+      scheduleSync()
+    })
+    const unsubError = window.api.onProxyError(() => {
+      scheduleSync()
+    })
+    const unsubStatus = window.api.onProxyStatusChange(() => {
+      scheduleSync()
+    })
+
+    return () => {
+      if (syncTimer) {
+        clearTimeout(syncTimer)
+      }
+      unsubResponse()
+      unsubError()
+      unsubStatus()
+    }
+  }, [syncProxyAccountStates])
 
   const renderPage = () => {
     if (webMode && ['machineId', 'kiroSettings', 'kproxy'].includes(currentPage)) {

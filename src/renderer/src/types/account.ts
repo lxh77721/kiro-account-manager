@@ -91,6 +91,12 @@ export interface AccountTag {
   color: string // hex color
 }
 
+export interface AccountProxyState {
+  cooldownUntil?: number
+  cooldownReason?: 'quota' | 'error'
+  updatedAt?: number
+}
+
 /**
  * 账号实体
  */
@@ -121,6 +127,7 @@ export interface Account {
   // 状态
   status: AccountStatus
   lastError?: string
+  proxyState?: AccountProxyState
   isActive: boolean // 是否为当前激活账号
 
   // 时间戳
@@ -156,6 +163,7 @@ export interface AccountFilter {
   daysRemainingMin?: number
   daysRemainingMax?: number
   bannedOnly?: boolean // 仅显示封禁账号
+  rateLimitedOnly?: boolean // 仅显示限流账号
 }
 
 /**
@@ -184,7 +192,7 @@ export interface AccountSort {
 export interface AccountExportData {
   version: string
   exportedAt: number
-  accounts: Omit<Account, 'isActive'>[]
+  accounts: Omit<Account, 'isActive' | 'proxyState'>[]
   groups: AccountGroup[]
   tags: AccountTag[]
 }
@@ -224,6 +232,8 @@ export interface AccountStats {
   bySubscription: Record<SubscriptionType, number>
   byIdp: Record<IdpType, number>
   activeCount: number
+  normalCount: number
   expiringSoonCount: number // 7天内到期
   bannedCount: number // 封禁账号数
+  rateLimitedCount: number // 限流账号数
 }

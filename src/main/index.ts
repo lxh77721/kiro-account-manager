@@ -261,6 +261,10 @@ function initProxyServer(): ProxyServer {
     selectedAccountIds: [],
     logRequests: true,
     maxConcurrent: 10,
+    maxQueueSize: 50,
+    maxRequestBodyBytes: 2 * 1024 * 1024,
+    requestTimeoutMs: 180000,
+    maxInFlightPerAccount: 1,
     maxRetries: 3,
     retryDelayMs: 1000,
     tokenRefreshBeforeExpiry: 300 // 5分钟提前刷新
@@ -316,7 +320,9 @@ function initProxyServer(): ProxyServer {
           id: account.id,
           accessToken: account.accessToken,
           refreshToken: account.refreshToken,
-          expiresAt: account.expiresAt
+          expiresAt: account.expiresAt,
+          cooldownUntil: account.cooldownUntil,
+          cooldownReason: account.cooldownReason
         })
       },
       // Credits 更新回调 - 使用防抖持久化
@@ -4817,13 +4823,40 @@ app.whenReady().then(async () => {
   })
 
   // IPC: 同步账号到反代池（批量更新）
-  ipcMain.handle('proxy-sync-accounts', (_event, accounts: ProxyAccount[]) => {
+  ipcMain.handle('proxy-sync-accounts', (_event, accounts: Array<ProxyAccount & {
+    credentials?: {
+      accessToken?: string
+      refreshToken?: string
+      clientId?: string
+      clientSecret?: string
+      region?: string
+      authMethod?: string
+      provider?: string
+      expiresAt?: number
+    }
+  }>) => {
     try {
       const server = initProxyServer()
       const pool = server.getAccountPool()
       pool.clear()
       for (const account of accounts) {
-        pool.addAccount(account)
+        const credentials = account.credentials || {}
+        const normalizedAuthMethod = (account.authMethod || credentials.authMethod || '').toLowerCase()
+
+        pool.addAccount({
+          id: account.id,
+          email: account.email,
+          accessToken: account.accessToken || credentials.accessToken || '',
+          refreshToken: account.refreshToken || credentials.refreshToken,
+          clientId: account.clientId || credentials.clientId,
+          clientSecret: account.clientSecret || credentials.clientSecret,
+          region: account.region || credentials.region || 'us-east-1',
+          authMethod: normalizedAuthMethod === 'idc' ? 'idc' : normalizedAuthMethod === 'social' ? 'social' : undefined,
+          provider: account.provider || credentials.provider,
+          profileArn: account.profileArn,
+          expiresAt: account.expiresAt || credentials.expiresAt,
+          machineId: account.machineId
+        })
       }
       return { success: true, accountCount: pool.size }
     } catch (error) {
@@ -4835,12 +4868,13 @@ app.whenReady().then(async () => {
   // IPC: 获取反代池账号列表
   ipcMain.handle('proxy-get-accounts', () => {
     if (!proxyServer) {
-      return { accounts: [], availableCount: 0 }
+      return { accounts: [], availableCount: 0, rateLimitedCount: 0 }
     }
     const pool = proxyServer.getAccountPool()
     return {
       accounts: pool.getAllAccounts(),
-      availableCount: pool.availableCount
+      availableCount: pool.availableCount,
+      rateLimitedCount: pool.rateLimitedCount
     }
   })
 
@@ -4986,6 +5020,34 @@ app.whenReady().then(async () => {
   // ============ K-Proxy MITM 代理 IPC ============
 
   // IPC: 初始化 K-Proxy 服务
+  ipcMain.handle('proxy-reset-account-state', (_event, accountId: string) => {
+    try {
+      if (!proxyServer) {
+        return { success: true }
+      }
+
+      const pool = proxyServer.getAccountPool()
+      const reset = pool.resetAccountState(accountId)
+      const updatedAccount = pool.getAccount(accountId)
+
+      if (reset && updatedAccount) {
+        mainWindow?.webContents.send('proxy-account-update', {
+          id: updatedAccount.id,
+          accessToken: updatedAccount.accessToken,
+          refreshToken: updatedAccount.refreshToken,
+          expiresAt: updatedAccount.expiresAt,
+          cooldownUntil: updatedAccount.cooldownUntil,
+          cooldownReason: updatedAccount.cooldownReason
+        })
+      }
+
+      return { success: true }
+    } catch (error) {
+      console.error('[ProxyServer] Reset account state failed:', error)
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to reset account state' }
+    }
+  })
+
   ipcMain.handle('kproxy-init', async () => {
     try {
       const savedConfig = store?.get('kproxyConfig') as Partial<KProxyConfig> | undefined

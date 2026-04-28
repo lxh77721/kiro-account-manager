@@ -1,16 +1,17 @@
-// 多账号轮询管理器
 import type { ProxyAccount, AccountStats } from './types'
 
 export interface AccountPoolConfig {
-  cooldownMs: number // 错误后冷却时间
-  maxErrorCount: number // 最大连续错误次数
-  quotaResetMs: number // 配额重置时间
+  cooldownMs: number
+  maxErrorCount: number
+  quotaResetMs: number
+  maxInFlightPerAccount: number
 }
 
 const DEFAULT_CONFIG: AccountPoolConfig = {
-  cooldownMs: 60000, // 1分钟冷却
-  maxErrorCount: 3, // 3次错误后暂停
-  quotaResetMs: 3600000 // 1小时配额重置
+  cooldownMs: 60000,
+  maxErrorCount: 3,
+  quotaResetMs: 3600000,
+  maxInFlightPerAccount: 1
 }
 
 export class AccountPool {
@@ -23,14 +24,24 @@ export class AccountPool {
     this.config = { ...DEFAULT_CONFIG, ...config }
   }
 
-  // 添加账号
+  updateConfig(config: Partial<AccountPoolConfig>): void {
+    this.config = {
+      ...this.config,
+      ...config,
+      maxInFlightPerAccount: Math.max(1, config.maxInFlightPerAccount ?? this.config.maxInFlightPerAccount)
+    }
+  }
+
   addAccount(account: ProxyAccount): void {
     this.accounts.set(account.id, {
       ...account,
       isAvailable: true,
       requestCount: 0,
       errorCount: 0,
-      lastUsed: 0
+      inFlightCount: 0,
+      lastUsed: 0,
+      cooldownUntil: undefined,
+      cooldownReason: undefined
     })
     this.accountStats.set(account.id, {
       requests: 0,
@@ -45,75 +56,77 @@ export class AccountPool {
     console.log(`[AccountPool] Added account: ${account.email || account.id}`)
   }
 
-  // 移除账号
   removeAccount(accountId: string): void {
     this.accounts.delete(accountId)
     this.accountStats.delete(accountId)
     console.log(`[AccountPool] Removed account: ${accountId}`)
   }
 
-  // 更新账号
   updateAccount(accountId: string, updates: Partial<ProxyAccount>): void {
     const account = this.accounts.get(accountId)
-    if (account) {
-      this.accounts.set(accountId, { ...account, ...updates })
+    if (!account) {
+      return
     }
+
+    this.accounts.set(accountId, {
+      ...account,
+      ...updates
+    })
   }
 
-  // 获取下一个可用账号（轮询）
   getNextAccount(): ProxyAccount | null {
-    const accountList = Array.from(this.accounts.values())
-    if (accountList.length === 0) {
-      return null
-    }
-
-    const now = Date.now()
-    let attempts = 0
-    const maxAttempts = accountList.length
-
-    while (attempts < maxAttempts) {
-      const account = accountList[this.currentIndex]
-      this.currentIndex = (this.currentIndex + 1) % accountList.length
-
-      // 检查账号是否可用
-      if (this.isAccountAvailable(account, now)) {
-        return account
-      }
-
-      attempts++
-    }
-
-    // 没有可用账号，返回冷却时间最短的
-    return this.getAccountWithShortestCooldown(accountList, now)
+    return this.findNextAccount()
   }
 
-  // 获取特定账号
+  acquireNextAccount(): ProxyAccount | null {
+    return this.acquireAccount(this.findNextAccount())
+  }
+
   getAccount(accountId: string): ProxyAccount | null {
     return this.accounts.get(accountId) || null
   }
 
-  // 获取下一个可用账号（排除当前账号）
-  getNextAvailableAccount(excludeAccountId: string): ProxyAccount | null {
-    const accountList = Array.from(this.accounts.values())
-    if (accountList.length <= 1) {
-      return null
-    }
-
-    const now = Date.now()
-    
-    // 尝试找到一个可用的账号（排除当前账号）
-    for (const account of accountList) {
-      if (account.id !== excludeAccountId && this.isAccountAvailable(account, now)) {
-        return account
-      }
-    }
-
-    // 没有立即可用的账号，返回冷却时间最短的（排除当前账号）
-    const otherAccounts = accountList.filter(a => a.id !== excludeAccountId)
-    return this.getAccountWithShortestCooldown(otherAccounts, now)
+  acquireAccountById(accountId: string): ProxyAccount | null {
+    return this.acquireAccount(this.accounts.get(accountId) || null)
   }
 
-  // 获取所有账号
+  isAccountAvailable(accountId: string): boolean {
+    const account = this.accounts.get(accountId)
+    if (!account) {
+      return false
+    }
+
+    return this.isAccountAvailableAt(account, Date.now())
+  }
+
+  getFirstAvailableAccount(): ProxyAccount | null {
+    return this.findFirstAvailableAccount()
+  }
+
+  acquireFirstAvailableAccount(): ProxyAccount | null {
+    return this.acquireAccount(this.findFirstAvailableAccount())
+  }
+
+  getNextAvailableAccount(excludeAccountId: string): ProxyAccount | null {
+    return this.findNextAvailableExcluding(excludeAccountId)
+  }
+
+  acquireNextAvailableAccount(excludeAccountId: string): ProxyAccount | null {
+    return this.acquireAccount(this.findNextAvailableExcluding(excludeAccountId))
+  }
+
+  releaseAccount(accountId: string): void {
+    const account = this.accounts.get(accountId)
+    if (!account) {
+      return
+    }
+
+    this.accounts.set(accountId, {
+      ...account,
+      inFlightCount: Math.max(0, (account.inFlightCount || 0) - 1)
+    })
+  }
+
   getAllAccounts(): ProxyAccount[] {
     return Array.from(this.accounts.values())
   }
@@ -130,14 +143,23 @@ export class AccountPool {
     return Boolean(account.clientId && account.clientSecret)
   }
 
-  // 检查账号是否可用
-  private isAccountAvailable(account: ProxyAccount, now: number): boolean {
-    // 检查冷却时间
+  private isRateLimited(account: ProxyAccount): boolean {
+    return account.cooldownReason === 'quota'
+  }
+
+  private isAccountAvailableAt(account: ProxyAccount, now: number): boolean {
+    if (this.isRateLimited(account)) {
+      return false
+    }
+
+    if ((account.inFlightCount || 0) >= this.config.maxInFlightPerAccount) {
+      return false
+    }
+
     if (account.cooldownUntil && account.cooldownUntil > now) {
       return false
     }
 
-    // 检查错误计数
     if ((account.errorCount || 0) >= this.config.maxErrorCount) {
       return false
     }
@@ -146,7 +168,6 @@ export class AccountPool {
       return false
     }
 
-    // 检查 token 是否过期
     if (account.expiresAt && account.expiresAt < now && !this.canRefreshAccount(account)) {
       return false
     }
@@ -154,34 +175,86 @@ export class AccountPool {
     return account.isAvailable !== false
   }
 
-  // 获取冷却时间最短的账号
-  private getAccountWithShortestCooldown(accounts: ProxyAccount[], now: number): ProxyAccount | null {
-    let bestAccount: ProxyAccount | null = null
-    let shortestWait = Infinity
+  private findNextAccount(): ProxyAccount | null {
+    const accountList = Array.from(this.accounts.values())
+    if (accountList.length === 0) {
+      return null
+    }
 
-    for (const account of accounts) {
-      const cooldownUntil = account.cooldownUntil || 0
-      const wait = Math.max(0, cooldownUntil - now)
-      
-      if (wait < shortestWait) {
-        shortestWait = wait
-        bestAccount = account
+    const now = Date.now()
+    let attempts = 0
+    const maxAttempts = accountList.length
+
+    while (attempts < maxAttempts) {
+      const account = accountList[this.currentIndex]
+      this.currentIndex = (this.currentIndex + 1) % accountList.length
+
+      if (this.isAccountAvailableAt(account, now)) {
+        return account
+      }
+
+      attempts++
+    }
+
+    return null
+  }
+
+  private findFirstAvailableAccount(): ProxyAccount | null {
+    const now = Date.now()
+
+    for (const account of this.accounts.values()) {
+      if (this.isAccountAvailableAt(account, now)) {
+        return account
       }
     }
 
-    return bestAccount
+    return null
   }
 
-  // 记录请求成功
+  private findNextAvailableExcluding(excludeAccountId: string): ProxyAccount | null {
+    if (this.accounts.size <= 1) {
+      return null
+    }
+
+    const now = Date.now()
+    for (const account of this.accounts.values()) {
+      if (account.id !== excludeAccountId && this.isAccountAvailableAt(account, now)) {
+        return account
+      }
+    }
+
+    return null
+  }
+
+  private acquireAccount(account: ProxyAccount | null): ProxyAccount | null {
+    if (!account) {
+      return null
+    }
+
+    const current = this.accounts.get(account.id)
+    if (!current || !this.isAccountAvailableAt(current, Date.now())) {
+      return null
+    }
+
+    const leasedAccount = {
+      ...current,
+      inFlightCount: (current.inFlightCount || 0) + 1
+    }
+    this.accounts.set(current.id, leasedAccount)
+    return leasedAccount
+  }
+
   recordSuccess(accountId: string, tokens: number = 0): void {
     const account = this.accounts.get(accountId)
     if (account) {
       this.accounts.set(accountId, {
         ...account,
         requestCount: (account.requestCount || 0) + 1,
-        errorCount: 0, // 重置错误计数
+        errorCount: 0,
         lastUsed: Date.now(),
-        isAvailable: true
+        isAvailable: true,
+        cooldownUntil: undefined,
+        cooldownReason: undefined
       })
     }
 
@@ -196,7 +269,6 @@ export class AccountPool {
     }
   }
 
-  // 记录请求失败
   recordError(accountId: string, isQuotaError: boolean = false): void {
     const account = this.accounts.get(accountId)
     if (!account) return
@@ -204,23 +276,30 @@ export class AccountPool {
     const errorCount = (account.errorCount || 0) + 1
     const now = Date.now()
 
-    let cooldownUntil = account.cooldownUntil || 0
+    let cooldownUntil = account.cooldownUntil
     let isAvailable = account.isAvailable !== false
+    let cooldownReason: ProxyAccount['cooldownReason'] = account.cooldownReason
 
     if (isQuotaError) {
-      // 配额错误，长时间冷却
       cooldownUntil = now + this.config.quotaResetMs
-      console.log(`[AccountPool] Account ${account.email || accountId} quota exhausted, cooldown until ${new Date(cooldownUntil).toISOString()}`)
+      cooldownReason = 'quota'
+      isAvailable = false
+      console.log(
+        `[AccountPool] Account ${account.email || accountId} moved to rate-limited pool (estimated quota reset ${new Date(cooldownUntil).toISOString()}, manual restore required)`
+      )
     } else if (errorCount >= this.config.maxErrorCount) {
-      // 连续错误过多，进入冷却
       cooldownUntil = now + this.config.cooldownMs
+      cooldownReason = 'error'
       console.log(`[AccountPool] Account ${account.email || accountId} too many errors, cooldown until ${new Date(cooldownUntil).toISOString()}`)
+    } else {
+      cooldownReason = cooldownUntil && cooldownUntil > now ? 'error' : undefined
     }
 
     this.accounts.set(accountId, {
       ...account,
       errorCount,
       cooldownUntil,
+      cooldownReason,
       isAvailable,
       lastUsed: now
     })
@@ -235,7 +314,6 @@ export class AccountPool {
     }
   }
 
-  // 标记账号需要刷新 Token
   markNeedsRefresh(accountId: string): void {
     const account = this.accounts.get(accountId)
     if (account) {
@@ -246,7 +324,6 @@ export class AccountPool {
     }
   }
 
-  // 获取统计信息
   getStats(): { accounts: Map<string, AccountStats>; total: { requests: number; tokens: number; errors: number } } {
     let totalRequests = 0
     let totalTokens = 0
@@ -268,40 +345,66 @@ export class AccountPool {
     }
   }
 
-  // 重置所有账号状态
   reset(): void {
     for (const [id, account] of this.accounts) {
       this.accounts.set(id, {
         ...account,
         isAvailable: true,
         errorCount: 0,
-        cooldownUntil: undefined
+        cooldownUntil: undefined,
+        cooldownReason: undefined
       })
     }
     this.currentIndex = 0
   }
 
-  // 清空所有账号
+  resetAccountState(accountId: string): boolean {
+    const account = this.accounts.get(accountId)
+    if (!account) {
+      return false
+    }
+
+    this.accounts.set(accountId, {
+      ...account,
+      isAvailable: true,
+      errorCount: 0,
+      cooldownUntil: undefined,
+      cooldownReason: undefined
+    })
+
+    return true
+  }
+
   clear(): void {
     this.accounts.clear()
     this.accountStats.clear()
     this.currentIndex = 0
   }
 
-  // 获取账号数量
   get size(): number {
     return this.accounts.size
   }
 
-  // 获取可用账号数量
   get availableCount(): number {
     const now = Date.now()
     let count = 0
     for (const account of this.accounts.values()) {
-      if (this.isAccountAvailable(account, now)) {
+      if (this.isAccountAvailableAt(account, now)) {
         count++
       }
     }
+    return count
+  }
+
+  get rateLimitedCount(): number {
+    let count = 0
+
+    for (const account of this.accounts.values()) {
+      if (this.isRateLimited(account)) {
+        count++
+      }
+    }
+
     return count
   }
 }

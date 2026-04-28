@@ -81,6 +81,7 @@ export function ProxyPanel() {
   const [sessionStats, setSessionStats] = useState<SessionStats | null>(null)
   const [accountCount, setAccountCount] = useState(0)
   const [availableCount, setAvailableCount] = useState(0)
+  const [rateLimitedCount, setRateLimitedCount] = useState(0)
   const [copied, setCopied] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [recentLogs, setRecentLogs] = useState<Array<{ time: string; path: string; model?: string; status: number; tokens?: number; inputTokens?: number; outputTokens?: number; credits?: number; error?: string }>>([])
@@ -163,6 +164,7 @@ export function ProxyPanel() {
       const accountsResult = await window.api.proxyGetAccounts()
       setAccountCount(accountsResult.accounts.length)
       setAvailableCount(accountsResult.availableCount)
+      setRateLimitedCount(accountsResult.rateLimitedCount || 0)
     } catch (err) {
       console.error('Failed to fetch proxy status:', err)
     }
@@ -788,14 +790,23 @@ export function ProxyPanel() {
 
       {/* 统计卡片 */}
       {isRunning && (
-        <div className="grid grid-cols-6 gap-3">
+        <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-3">
           <Card className="border-0 shadow-sm hover:shadow-md transition-shadow duration-200 bg-gradient-to-br from-blue-500/5 to-transparent">
             <CardContent className="pt-3 pb-3">
               <div className="flex items-center gap-1 text-xs text-muted-foreground mb-1">
                 <Users className="h-3 w-3" />
-                <span>{isEn ? 'Pool' : '账号池'}</span>
+                <span>{isEn ? 'Normal' : '正常账号'}</span>
               </div>
               <div className="text-xl font-bold text-foreground">{availableCount}/{accountCount}</div>
+            </CardContent>
+          </Card>
+          <Card className="border-0 shadow-sm hover:shadow-md transition-shadow duration-200 bg-gradient-to-br from-amber-500/5 to-transparent">
+            <CardContent className="pt-3 pb-3">
+              <div className="flex items-center gap-1 text-xs text-muted-foreground mb-1">
+                <AlertCircle className="h-3 w-3" />
+                <span>{isEn ? 'Rate Limited' : '限流账号'}</span>
+              </div>
+              <div className="text-xl font-bold text-amber-600">{rateLimitedCount}</div>
             </CardContent>
           </Card>
           <Card className="border-0 shadow-sm hover:shadow-md transition-shadow duration-200 bg-gradient-to-br from-purple-500/5 to-transparent">

@@ -527,6 +527,7 @@ export function installWebRuntimeApi(): void {
     proxySyncAccounts: (accounts) => callRenderer('proxySyncAccounts', { accounts }),
     proxyGetAccounts: () => callRenderer('proxyGetAccounts'),
     proxyResetPool: () => callRenderer('proxyResetPool'),
+    proxyResetAccountState: (accountId) => callRenderer('proxyResetAccountState', { accountId }),
     proxyRefreshModels: () => callRenderer('proxyRefreshModels'),
     proxyGetModels: () => callRenderer('proxyGetModels'),
     accountGetModels: (accessToken, region, profileArn, accountId) =>
@@ -545,6 +546,7 @@ export function installWebRuntimeApi(): void {
     onProxyResponse: (callback) => addListener(proxyResponseListeners, callback),
     onProxyError: (callback) => addListener(proxyErrorListeners, callback),
     onProxyStatusChange: (callback) => addListener(proxyStatusChangeListeners, callback),
+    onProxyAccountUpdate: () => () => {},
 
     getUsageApiType: async () => getStoredPreference<'rest' | 'cbor'>('usageApiType', 'rest'),
     setUsageApiType: async (type) => {

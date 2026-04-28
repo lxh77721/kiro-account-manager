@@ -239,8 +239,10 @@ export interface ProxyAccount {
   lastUsed?: number
   requestCount?: number
   errorCount?: number
+  inFlightCount?: number
   isAvailable?: boolean
   cooldownUntil?: number
+  cooldownReason?: 'quota' | 'error'
 }
 
 // API Key 格式类型
@@ -321,6 +323,10 @@ export interface ProxyConfig {
   selectedAccountIds: string[]
   logRequests: boolean
   maxConcurrent: number
+  maxQueueSize?: number
+  maxRequestBodyBytes?: number
+  requestTimeoutMs?: number
+  maxInFlightPerAccount?: number
   // 重试配置
   maxRetries?: number
   retryDelayMs?: number

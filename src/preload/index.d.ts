@@ -597,10 +597,12 @@ interface KiroApi {
   }>) => Promise<{ success: boolean; accountCount?: number; error?: string }>
 
   // 获取反代池账号列表
-  proxyGetAccounts: () => Promise<{ accounts: unknown[]; availableCount: number }>
+  proxyGetAccounts: () => Promise<{ accounts: unknown[]; availableCount: number; rateLimitedCount: number }>
 
   // 重置反代池状态
   proxyResetPool: () => Promise<{ success: boolean; error?: string }>
+
+  proxyResetAccountState: (accountId: string) => Promise<{ success: boolean; error?: string }>
 
   // 刷新模型缓存
   proxyRefreshModels: () => Promise<{ success: boolean; error?: string }>
@@ -637,6 +639,8 @@ interface KiroApi {
 
   // 监听反代状态变化事件
   onProxyStatusChange: (callback: (status: { running: boolean; port: number }) => void) => () => void
+
+  onProxyAccountUpdate: (callback: (account: { id: string; accessToken?: string; refreshToken?: string; expiresAt?: number; cooldownUntil?: number; cooldownReason?: 'quota' | 'error' }) => void) => () => void
 
   // ============ Usage API 类型设置 ============
 
