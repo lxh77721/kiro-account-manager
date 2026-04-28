@@ -477,9 +477,18 @@ const KIRO_SOFT_MAX_CONVERSATION_TEXT_CHARS = 90000
 const KIRO_AGGRESSIVE_MAX_CONVERSATION_TEXT_CHARS = 60000
 const KIRO_SOFT_MAX_CURRENT_MESSAGE_CHARS = 28000
 const KIRO_AGGRESSIVE_MAX_CURRENT_MESSAGE_CHARS = 22000
+const KIRO_PREEMPTIVE_MAX_PAYLOAD_BYTES = 120000
+const KIRO_PREEMPTIVE_MAX_HISTORY_MESSAGES = 28
+const KIRO_PREEMPTIVE_MAX_CURRENT_MESSAGE_CHARS = 18000
+const KIRO_PREEMPTIVE_MAX_TOOLS = 24
+const KIRO_PREEMPTIVE_THINKING_HISTORY_MESSAGES = 20
+const KIRO_PREEMPTIVE_THINKING_TOOLS = 12
+const KIRO_PREEMPTIVE_THINKING_CONTENT_CHARS = 14000
 const KIRO_SOFT_TOOL_DESC_LEN = 800
 const KIRO_AGGRESSIVE_TOOL_DESC_LEN = 280
 const KIRO_PAYLOAD_TRUNCATION_MARKER = '\n...[truncated by proxy to fit upstream limits]...\n'
+const KIRO_THINKING_PROMPT_PATTERN =
+  /^<thinking_mode>enabled<\/thinking_mode>\s*<max_thinking_length>\d+<\/max_thinking_length>\s*/i
 const TOOL_SCHEMA_OMIT_KEYS = new Set([
   '$schema',
   'examples',
@@ -493,6 +502,14 @@ interface PreparedKiroPayload {
   payload: KiroPayload
   size: number
   notes: string[]
+  label: string
+}
+
+interface PrepareKiroPayloadOptions {
+  aggressive?: boolean
+  stripThinking?: boolean
+  truncateCurrentMessage?: boolean
+  label: string
 }
 
 function cloneKiroPayload(payload: KiroPayload): KiroPayload {
@@ -512,6 +529,23 @@ function truncateMiddleText(value: string, maxLength: number): string {
   const tailLength = Math.max(minimumSegmentLength, available - headLength)
 
   return `${value.slice(0, headLength)}${KIRO_PAYLOAD_TRUNCATION_MARKER}${value.slice(-tailLength)}`
+}
+
+function hasInjectedThinkingPrompt(payload: KiroPayload): boolean {
+  return KIRO_THINKING_PROMPT_PATTERN.test(
+    payload.conversationState.currentMessage.userInputMessage.content || ''
+  )
+}
+
+function stripThinkingPromptInPayload(payload: KiroPayload, notes: string[]): void {
+  const currentMessage = payload.conversationState.currentMessage.userInputMessage
+  const beforeContent = currentMessage.content || ''
+  const afterContent = beforeContent.replace(KIRO_THINKING_PROMPT_PATTERN, '').replace(/^\s+/, '')
+
+  if (afterContent !== beforeContent) {
+    currentMessage.content = afterContent || 'Continue'
+    notes.push(`thinking:${beforeContent.length}->${currentMessage.content.length}`)
+  }
 }
 
 function compactToolSchemaForTransport(schema: unknown, aggressive: boolean): unknown {
@@ -714,14 +748,21 @@ function truncateCurrentMessageInPayload(
 
 function prepareKiroPayloadForTransport(
   payload: KiroPayload,
-  aggressive: boolean = false
+  options: PrepareKiroPayloadOptions
 ): PreparedKiroPayload {
+  const { aggressive = false, stripThinking = false, truncateCurrentMessage = true, label } = options
   const workingPayload = cloneKiroPayload(payload)
   const notes: string[] = []
 
+  if (stripThinking) {
+    stripThinkingPromptInPayload(workingPayload, notes)
+  }
+
   compactToolDefinitionsInPayload(workingPayload, aggressive, notes)
   trimHistoryInPayload(workingPayload, aggressive, notes)
-  truncateCurrentMessageInPayload(workingPayload, aggressive, notes)
+  if (truncateCurrentMessage) {
+    truncateCurrentMessageInPayload(workingPayload, aggressive, notes)
+  }
 
   const size = measurePayloadBytes(workingPayload)
 
@@ -730,6 +771,7 @@ function prepareKiroPayloadForTransport(
       'KiroPayload',
       aggressive ? 'Applied aggressive payload compaction' : 'Applied payload compaction',
       {
+        label,
         notes,
         payloadSize: size,
         contentLength: workingPayload.conversationState.currentMessage.userInputMessage.content?.length || 0,
@@ -740,7 +782,7 @@ function prepareKiroPayloadForTransport(
     )
   }
 
-  return { payload: workingPayload, size, notes }
+  return { payload: workingPayload, size, notes, label }
 }
 
 function shouldRetryWithAggressiveCompaction(status: number, body: string): boolean {
@@ -754,6 +796,96 @@ function shouldRetryWithAggressiveCompaction(status: number, body: string): bool
     normalized.includes('content_length_exceeds_threshold') ||
     normalized.includes('improperly formed request')
   )
+}
+
+function isPayloadPressureLikely(
+  payload: KiroPayload,
+  preparedPayload: PreparedKiroPayload
+): boolean {
+  const contentLength = payload.conversationState.currentMessage.userInputMessage.content.length
+  const historyLength = payload.conversationState.history?.length || 0
+  const toolsCount =
+    payload.conversationState.currentMessage.userInputMessage.userInputMessageContext?.tools?.length || 0
+  const thinkingEnabled = hasInjectedThinkingPrompt(payload)
+
+  return (
+    preparedPayload.size > KIRO_PREEMPTIVE_MAX_PAYLOAD_BYTES ||
+    contentLength > KIRO_PREEMPTIVE_MAX_CURRENT_MESSAGE_CHARS ||
+    historyLength > KIRO_PREEMPTIVE_MAX_HISTORY_MESSAGES ||
+    toolsCount > KIRO_PREEMPTIVE_MAX_TOOLS ||
+    (thinkingEnabled &&
+      (historyLength > KIRO_PREEMPTIVE_THINKING_HISTORY_MESSAGES ||
+        toolsCount > KIRO_PREEMPTIVE_THINKING_TOOLS ||
+        contentLength > KIRO_PREEMPTIVE_THINKING_CONTENT_CHARS))
+  )
+}
+
+function buildPayloadCandidates(payload: KiroPayload): PreparedKiroPayload[] {
+  const candidates: PreparedKiroPayload[] = []
+  const seen = new Set<string>()
+  const contentLength = payload.conversationState.currentMessage.userInputMessage.content.length
+  const thinkingEnabled = hasInjectedThinkingPrompt(payload)
+
+  const pushCandidate = (candidate: PreparedKiroPayload): void => {
+    const key = JSON.stringify(candidate.payload)
+    if (seen.has(key)) {
+      return
+    }
+    seen.add(key)
+    candidates.push(candidate)
+  }
+
+  const baseCandidate = prepareKiroPayloadForTransport(payload, {
+    label: 'soft-preserve-current',
+    truncateCurrentMessage: false
+  })
+  pushCandidate(baseCandidate)
+
+  const pressureLikely = isPayloadPressureLikely(payload, baseCandidate)
+  const needsCurrentTruncation = contentLength > KIRO_SOFT_MAX_CURRENT_MESSAGE_CHARS
+
+  if (pressureLikely && thinkingEnabled) {
+    pushCandidate(
+      prepareKiroPayloadForTransport(payload, {
+        label: 'soft-without-thinking',
+        stripThinking: true,
+        truncateCurrentMessage: false
+      })
+    )
+  }
+
+  if (pressureLikely) {
+    pushCandidate(
+      prepareKiroPayloadForTransport(payload, {
+        aggressive: true,
+        label: thinkingEnabled ? 'aggressive-without-thinking' : 'aggressive-preserve-current',
+        stripThinking: thinkingEnabled,
+        truncateCurrentMessage: false
+      })
+    )
+  }
+
+  if (needsCurrentTruncation) {
+    pushCandidate(
+      prepareKiroPayloadForTransport(payload, {
+        label: 'soft-truncate-current',
+        truncateCurrentMessage: true
+      })
+    )
+  }
+
+  if (pressureLikely || needsCurrentTruncation) {
+    pushCandidate(
+      prepareKiroPayloadForTransport(payload, {
+        aggressive: true,
+        label: thinkingEnabled ? 'last-resort-without-thinking' : 'last-resort-truncate-current',
+        stripThinking: thinkingEnabled,
+        truncateCurrentMessage: true
+      })
+    )
+  }
+
+  return candidates
 }
 
 function getAccountMachineId(accountId: string, accountMachineId?: string): string | undefined {
@@ -812,20 +944,12 @@ export async function callKiroApiStream(
 ): Promise<void> {
   const endpoints = getSortedEndpoints(preferredEndpoint)
   let lastError: Error | null = null
-  const preparedPayload = prepareKiroPayloadForTransport(payload, false)
-  const needsAggressivePayloadFallback =
-    measurePayloadBytes(payload) > KIRO_SOFT_MAX_PAYLOAD_BYTES ||
-    (payload.conversationState.history?.length || 0) > KIRO_SOFT_MAX_HISTORY_MESSAGES ||
-    payload.conversationState.currentMessage.userInputMessage.content.length > KIRO_SOFT_MAX_CURRENT_MESSAGE_CHARS ||
-    (payload.conversationState.currentMessage.userInputMessage.userInputMessageContext?.tools?.length || 0) > 64
-  const aggressivePreparedPayload =
-    needsAggressivePayloadFallback
-      ? prepareKiroPayloadForTransport(payload, true)
-      : null
+  const payloadCandidates = buildPayloadCandidates(payload)
+  const lastCandidate = payloadCandidates[payloadCandidates.length - 1]
 
-  if (aggressivePreparedPayload && aggressivePreparedPayload.size > KIRO_SOFT_MAX_PAYLOAD_BYTES) {
+  if (lastCandidate.size > KIRO_SOFT_MAX_PAYLOAD_BYTES) {
     onError(Object.assign(
-      new Error(`Request is too large after payload compaction (${aggressivePreparedPayload.size} bytes); reduce history or tool definitions.`),
+      new Error(`Request is too large after payload compaction (${lastCandidate.size} bytes); reduce history or tool definitions.`),
       { statusCode: 413, accountStateHandled: true }
     ))
     return
@@ -834,10 +958,6 @@ export async function callKiroApiStream(
   for (const endpoint of endpoints) {
     try {
       // 更新 payload 中的 origin
-      const payloadCandidates = aggressivePreparedPayload
-        ? [preparedPayload, aggressivePreparedPayload]
-        : [preparedPayload]
-
       for (let candidateIndex = 0; candidateIndex < payloadCandidates.length; candidateIndex++) {
         const candidate = payloadCandidates[candidateIndex]
         const requestPayload = cloneKiroPayload(candidate.payload)
@@ -847,6 +967,7 @@ export async function callKiroApiStream(
         const payloadStr = JSON.stringify(requestPayload)
         if (ENABLE_KIRO_DIAGNOSTIC_LOGS) {
           console.log(`[KiroAPI] Request to ${endpoint.name}:`)
+          console.log(`[KiroAPI]   - Candidate: ${candidate.label}`)
           console.log(`[KiroAPI]   - Content length: ${requestPayload.conversationState.currentMessage.userInputMessage?.content?.length || 0}`)
           console.log(`[KiroAPI]   - Tools count: ${requestPayload.conversationState.currentMessage.userInputMessage?.userInputMessageContext?.tools?.length || 0}`)
           console.log(`[KiroAPI]   - Payload size: ${payloadStr.length} bytes`)
@@ -881,12 +1002,13 @@ export async function callKiroApiStream(
           const body = await response.text()
 
           if (
-            candidateIndex === 0 &&
-            aggressivePreparedPayload &&
+            candidateIndex + 1 < payloadCandidates.length &&
             shouldRetryWithAggressiveCompaction(response.status, body)
           ) {
-            proxyLogger.warn('KiroPayload', 'Retrying request with aggressive payload compaction', {
+            proxyLogger.warn('KiroPayload', 'Retrying request with fallback payload candidate', {
               endpoint: endpoint.name,
+              currentCandidate: candidate.label,
+              nextCandidate: payloadCandidates[candidateIndex + 1].label,
               status: response.status,
               body: body.slice(0, 500)
             })
